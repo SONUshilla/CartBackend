@@ -22,11 +22,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 // Database client setup
 const db = new Client({
-  user: 'postgres',      
-  host: 'localhost',    
-  database: 'Ecommerse', 
-  password: 'Sonu@123', 
-  port: 5432            
+  connectionString: process.env.CONNECTIONSTRING
 });
 
 // Connect to the database
