@@ -69,6 +69,11 @@ app.post('/login', async (req, res) => {
 app.post('/register', async (req, res) => {
   const { username, password } = req.body;
   try {
+    const existing = await db.query('SELECT * FROM users WHERE username=$1', [username]);
+    if(existing.rows.length > 0) {
+      return res.status(409).json({ message: 'Username already exists' });
+    }
+    // Hash the password (you should use a more secure hashing algorithm)
     const hashedPassword = await bcrypt.hash(password, 10);
     const result = await db.query('INSERT INTO users (username, password) VALUES ($1, $2) RETURNING *', [username, hashedPassword]);
     const newUser = result.rows[0];
