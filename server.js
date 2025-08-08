@@ -333,7 +333,7 @@ app.post(
         await db.query(
           `INSERT INTO order_items (order_id, product_id, quantity, price)
            VALUES ($1, $2, $3, $4)`,
-          [orderId, item.product_id, item.quantity, item.price]
+          [orderId, item.id, item.quantity, item.price]
         );
       }
 
@@ -422,7 +422,7 @@ app.post('/cart', passport.authenticate('jwt', { session: false }), async (req, 
 });
 app.get('/getCart', passport.authenticate('jwt', { session: false }), async (req, res) => {
     const userId = req.user.user_id; 
-    const result = await db.query('SELECT * FROM cart WHERE user_id=$1', [userId]);
+    const result = await db.query('SELECT name, image, user_id, price, quantity,  id AS product_id FROM cart WHERE user_id = $1', [userId]);
     res.json(result.rows);
 });
 
@@ -530,7 +530,29 @@ app.get(
     }
   }
 );
+app.patch('/orders/:id/cancel',  passport.authenticate('jwt', { session: false }), async (req, res) => {
+  const orderId = req.params.id;
 
+  try {
+    const query = `
+      UPDATE orders
+      SET status = 'Cancelled'
+      WHERE order_id = $1
+      RETURNING *;
+    `;
+
+    const result = await db.query(query, [orderId]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'Order not found' });
+    }
+
+    res.status(200).json({ message: 'Order cancelled', order: result.rows[0] });
+  } catch (error) {
+    console.error('DB Error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
 app.get(
   "/orders/:id",
   passport.authenticate("jwt", { session: false }),

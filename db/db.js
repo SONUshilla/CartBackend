@@ -1,17 +1,20 @@
 import pg from 'pg';
 import dotenv from "dotenv";
 dotenv.config();
-const { Client } = pg;
 
-// ✅ Replace this with your actual Supabase database password
-const connectionString =process.env.CONNECTIONSTRING;
+const { Pool } = pg;
+
+const connectionString = process.env.CONNECTIONSTRING;
 console.log(connectionString);
-const db = new Client({
+
+const db = new Pool({
   connectionString,
 });
 
-db.connect()
-  .then(() => console.log("✅ Connected to Supabase PostgreSQL"))
-  .catch(err => console.error("❌ Connection error:", err.stack));
+// Optional: Handle errors on idle clients
+db.on('error', (err) => {
+  console.error('Unexpected error on idle client', err);
+  process.exit(-1);
+});
 
 export default db;
