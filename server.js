@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt'; // Import bcrypt for password hashing
 import pkg from 'pg';
 import cors from "cors";
+import db from './db/db.js';
 const { Client } = pkg;
 import { Strategy as JwtStrategy, ExtractJwt } from 'passport-jwt'; // Import passport-jwt
 import axios from "axios";
@@ -20,15 +21,7 @@ app.use(express.json());
 
 // (Optional) Middleware to parse URL-encoded form data
 app.use(express.urlencoded({ extended: true }));
-// Database client setup
-const db = new Client({
-  connectionString: process.env.CONNECTIONSTRING
-});
 
-// Connect to the database
-db.connect()
-  .then(() => console.log('Connected to the database'))
-  .catch(err => console.error('Connection error', err.stack));
 
 // JWT strategy setup
 const jwtOptions = {
@@ -92,45 +85,259 @@ app.get('/check-session', passport.authenticate('jwt', { session: false }), asyn
 res.sendStatus(200);
 });
 
+async function unsetDefaultForUser(userId) {
+  await db.query(
+    'UPDATE user_addresses SET is_default = false WHERE user_id = $1 AND deleted_at IS NULL',
+    [userId]
+  );
+}
+// GET /getAddresses
+app.get('/getAddresses', async (req, res) => {
+  const user_id = 6;
+
+  if (!user_id) {
+    return res.status(400).json({ error: 'Missing user_id' });
+  }
+
+  try {
+    const query = `
+      SELECT *
+      FROM user_addresses
+      WHERE user_id = $1
+        AND deleted_at IS NULL
+      ORDER BY is_default DESC, updated_at DESC;
+    `;
+    const { rows } = await db.query(query, [user_id]);
+
+    // Convert DB snake_case → frontend camelCase
+    const formatted = rows.map(row => ({
+      id: row.id,
+      fullName: row.full_name,
+      addressLine1: row.line1,
+      addressLine2: row.line2,
+      city: row.city,
+      state: row.state,
+      zip: row.postal_code,
+      mobile: row.phone,
+      isDefault: row.is_default
+    }));
+
+    res.json(formatted);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch addresses' });
+  }
+});
+
+
+
+// POST /addAddress
+// POST /addAddress
+app.post('/addAddress', async (req, res) => {
+  console.log(req.body);
+
+  // Destructure using frontend field names
+  const {
+    fullName,
+    addressLine1,
+    addressLine2,
+    city,
+    state,
+    zip,
+    mobile,
+    isDefault
+  } = req.body.newAddress;
+
+  const user_id = 6; // Replace with actual logged-in user ID
+
+  // Validate required fields
+  if (!user_id || !fullName || !addressLine1 || !city || !zip) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+
+  try {
+    if (isDefault) {
+      await unsetDefaultForUser(user_id);
+    }
+
+    const insertQuery = `
+      INSERT INTO user_addresses
+        (user_id, full_name, phone, line1, line2, city, state, postal_code, is_default)
+      VALUES
+        ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      RETURNING *;
+    `;
+
+    const { rows } = await db.query(insertQuery, [
+      user_id,
+      fullName,
+      mobile || null,
+      addressLine1,
+      addressLine2 || null,
+      city,
+      state || null,
+      zip,
+      isDefault || false
+    ]);
+
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to add address' });
+  }
+});
+
+// POST /updateAddress
+app.post('/updateAddress', async (req, res) => {
+  let { id, user_id, ...fields } = req.body.address || req.body; // support if frontend sends { address: {...} }
+  user_id=6;
+  if (!id || !user_id) {
+    return res.status(400).json({ error: 'Missing id or user_id' });
+  }
+
+  // Map frontend camelCase → DB snake_case
+  const fieldMap = {
+    fullName: 'full_name',
+    addressLine1: 'line1',
+    addressLine2: 'line2',
+    city: 'city',
+    state: 'state',
+    zip: 'postal_code',
+    mobile: 'phone',
+    isDefault: 'is_default'
+  };
+
+  const dbFields = {};
+  for (const key in fields) {
+    if (fieldMap[key]) {
+      dbFields[fieldMap[key]] = fields[key];
+    }
+  }
+
+  try {
+    // If setting as default, unset existing default
+    if (dbFields.is_default) {
+      await unsetDefaultForUser(user_id);
+    }
+
+    const keys = Object.keys(dbFields);
+    if (!keys.length) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    const setClauses = keys.map((key, i) => `${key} = $${i + 1}`);
+    const values = keys.map(k => dbFields[k]);
+    values.push(id, user_id); // for WHERE clause
+
+    const updateQuery = `
+      UPDATE user_addresses
+      SET ${setClauses.join(', ')}, updated_at = now()
+      WHERE id = $${keys.length + 1}
+        AND user_id = $${keys.length + 2}
+        AND deleted_at IS NULL
+      RETURNING *;
+    `;
+
+    const { rows } = await db.query(updateQuery, values);
+
+    if (!rows.length) {
+      return res.status(404).json({ error: 'Address not found' });
+    }
+
+    // Convert DB snake_case → frontend camelCase for response
+    const row = rows[0];
+    const formatted = {
+      id: row.id,
+      fullName: row.full_name,
+      addressLine1: row.line1,
+      addressLine2: row.line2,
+      city: row.city,
+      state: row.state,
+      zip: row.postal_code,
+      mobile: row.phone,
+      isDefault: row.is_default
+    };
+
+    res.json(formatted);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to update address' });
+  }
+});
+
+
 app.post(
   '/checkOut',
   passport.authenticate('jwt', { session: false }),
   async (req, res) => {
+    
     const cartItems = req.body.cartItems; // [{ id, quantity, price }, ...]
-
+    const address = req.body.address;     // Full address object from frontend
+    const paymentMethod = req.body.paymentMethod;     
     if (!cartItems || !Array.isArray(cartItems) || cartItems.length === 0) {
       return res.status(400).json({ error: 'Cart is empty or invalid' });
     }
 
-
+    if (!address || !address.id) {
+      return res.status(400).json({ error: 'Address is required' });
+    }
     try {
+      // 1️⃣ Check if the address already exists for this user
+      const adress = await db.query(
+        `SELECT id FROM user_addresses 
+         WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
+        [address.id, req.user.user_id]
+      );
+      
+      // 2️⃣ If not found, insert the provided address into user_addresses
+      if (adress.rows.length === 0) {
+         adress=await db.query(
+          `INSERT INTO user_addresses
+            ( user_id, label, full_name, phone, line1, line2, city, state, postal_code, is_default)
+           VALUES
+            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+          [
+            req.user.user_id,
+            address.label || null,
+            address.fullName,
+            address.mobile || null,
+            address.addressLine1,
+            address.addressLine2 || null,
+            address.city,
+            address.state,
+            address.zip,
+            address.isDefault || false
+          ]
+        );
+      }
+      const addressId = adress.rows[0].id;
 
-      // 1️⃣ Calculate total
+      // 3️⃣ Calculate total
       const total = cartItems.reduce(
         (sum, item) => sum + item.price * item.quantity,
         0
       );
-
-      // 2️⃣ Insert one order
+      console.log(addressId);
+      // 4️⃣ Insert order (reference the address_id)
       const orderResult = await db.query(
-        `INSERT INTO orders (user_id, total, status)
-         VALUES ($1, $2, $3)
+        `INSERT INTO orders (user_id, total, status, address,payment_method)
+         VALUES ($1, $2, $3, $4,$5)
          RETURNING order_id`,
-        [req.user.user_id, total, 'Processing']
+        [req.user.user_id, total, 'Processing', addressId,paymentMethod]
       );
 
       const orderId = orderResult.rows[0].order_id;
 
-      // 3️⃣ Insert each item into order_items
+      // 5️⃣ Insert each item into order_items
       for (const item of cartItems) {
         await db.query(
           `INSERT INTO order_items (order_id, product_id, quantity, price)
            VALUES ($1, $2, $3, $4)`,
-          [orderId, item.id, item.quantity, item.price]
+          [orderId, item.product_id, item.quantity, item.price]
         );
       }
 
-      // 4️⃣ Clear the user's cart
+      // 6️⃣ Clear the user's cart
       await db.query(`DELETE FROM cart WHERE user_id = $1`, [
         req.user.user_id
       ]);
@@ -140,18 +347,49 @@ app.post(
         orderId
       });
     } catch (err) {
-      await client.query('ROLLBACK');
       console.error('Error inserting orders:', err);
       res.status(500).json({ error: 'Failed to place order' });
-    } 
+    }
   }
 );
+
+
+// POST /deleteAddress
+app.post('/deleteAddress', async (req, res) => {
+  const { id } = req.body;
+  const user_id=6;
+  if (!id || !user_id) {
+    return res.status(400).json({ error: 'Missing id or user_id' });
+  }
+
+  try {
+    const deleteQuery = `
+      UPDATE user_addresses
+      SET deleted_at = NOW()
+      WHERE id = $1
+        AND user_id = $2
+        AND deleted_at IS NULL
+      RETURNING *;
+    `;
+
+    const { rows } = await db.query(deleteQuery, [id, user_id]);
+
+    if (!rows.length) {
+      return res.status(404).json({ error: 'Address not found or already deleted' });
+    }
+
+    res.json({ success: true, message: 'Address deleted successfully', deletedAddress: rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to delete address' });
+  }
+});
 
 
 app.post('/cart', passport.authenticate('jwt', { session: false }), async (req, res) => {
   const { item } = req.body;
 
-  if (!item || !item.name || !item.price || !item.quantity) {
+  if (!item || !item.name || !item.price || !item.quantity || !item.id) {
     return res.status(400).json({ message: 'Invalid item data' });
   }
 
@@ -171,8 +409,8 @@ app.post('/cart', passport.authenticate('jwt', { session: false }), async (req, 
       );
     } else {
       await db.query(
-        'INSERT INTO cart (user_id, name, image, price, quantity) VALUES ($1, $2, $3, $4, $5)',
-        [userId, item.name, item.image, item.price, item.quantity]
+        "INSERT INTO cart (user_id, name, image, price, quantity,product_id) VALUES ($1, $2, $3, $4, $5,$6)",
+        [userId, item.name, item.image, item.price, item.quantity, item.id]
       );
     }
 
@@ -213,6 +451,7 @@ app.get('/products', (req, res) => {
 
 app.get('/products/category/:category', async (req, res) => {
   const { category } = req.params; // <-- from URL path
+  console.log(category);
   try {
     const result = await db.query(
       'SELECT * FROM products WHERE category = $1',
@@ -297,13 +536,18 @@ app.get(
   passport.authenticate("jwt", { session: false }),
   async (req, res) => {
     try {
-      const { id } = req.params;
+      const { id,address_id } = req.params;
 
       // Get the order
       const orderRes = await db.query(
         `SELECT * FROM orders
          WHERE order_id = $1 AND user_id = $2`,
         [id, req.user.user_id]
+      );
+      const shipping_address = await db.query(
+        `SELECT * FROM user_addresses
+         WHERE id= $1`,
+        [orderRes.rows[0].address]
       );
 
       if (orderRes.rows.length === 0) {
@@ -322,8 +566,10 @@ app.get(
       );
 
       order.items = itemsRes.rows;
-
-      res.json(order);
+      res.json({
+        order: order,                          // your order object
+        shipping_address: shipping_address.rows[0] // your address from DB
+      });
     } catch (err) {
       console.error("Error fetching order:", err);
       res.status(500).json({ error: "Failed to fetch order" });
@@ -331,6 +577,71 @@ app.get(
   }
 );
 
+app.get('/highlights', async (req, res) => {
+  try {
+    const bestDealsQuery = `
+  SELECT * FROM products
+  WHERE discount IS NOT NULL
+  ORDER BY discount DESC
+  LIMIT 5
+`;
+
+    const phonesQuery = `
+      SELECT * FROM products 
+      WHERE category ILIKE '%mobile%' 
+      ORDER BY discount DESC 
+      LIMIT 5
+    `;
+
+    const laptopsQuery = `
+      SELECT * FROM products 
+      WHERE category ILIKE '%laptop%' 
+      ORDER BY discount DESC
+      LIMIT 5
+    `;
+
+    const mensClothingQuery = `
+      SELECT * FROM products 
+      WHERE category ILIKE '%men''s clothing%' 
+      LIMIT 1
+    `;
+
+    const womensClothingQuery = `
+      SELECT * FROM products 
+      WHERE category ILIKE '%women''s clothing%' 
+      LIMIT 1
+    `;
+
+    const jewelryQuery = `
+      SELECT * FROM products 
+      WHERE category ILIKE '%jewel%' 
+      LIMIT 1
+    `;
+
+    const [bestDeals,phones, laptops, mens, womens, jewelry] = await Promise.all([
+      db.query(bestDealsQuery),
+      db.query(phonesQuery),
+      db.query(laptopsQuery),
+      db.query(mensClothingQuery),
+      db.query(womensClothingQuery),
+      db.query(jewelryQuery)
+    ]);
+
+    res.json({
+      bestDeals:bestDeals.rows,
+      phones: phones.rows,
+      laptops: laptops.rows,
+      categories: {
+        mensClothing: mens.rows[0] || null,
+        womensClothing: womens.rows[0] || null,
+        jewelry: jewelry.rows[0] || null
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching highlights:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
 
 
 // Start server
