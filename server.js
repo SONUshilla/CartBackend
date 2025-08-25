@@ -5,6 +5,10 @@ import bcrypt from 'bcrypt'; // Import bcrypt for password hashing
 import pkg from 'pg';
 import cors from "cors";
 import db from './db/db.js';
+import multer from 'multer';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 const { Client } = pkg;
 import { Strategy as JwtStrategy, ExtractJwt } from 'passport-jwt'; // Import passport-jwt
 import axios from "axios";
@@ -277,7 +281,7 @@ app.post(
   async (req, res) => {
     
     const cartItems = req.body.cartItems; // [{ id, quantity, price }, ...]
-    const address = req.body.address;     // Full address object from frontend
+    let address = req.body.address;     // Full address object from frontend
     const paymentMethod = req.body.paymentMethod;     
     if (!cartItems || !Array.isArray(cartItems) || cartItems.length === 0) {
       return res.status(400).json({ error: 'Cart is empty or invalid' });
@@ -288,7 +292,7 @@ app.post(
     }
     try {
       // 1️⃣ Check if the address already exists for this user
-      const adress = await db.query(
+      let adress = await db.query(
         `SELECT id FROM user_addresses 
          WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
         [address.id, req.user.user_id]
@@ -322,7 +326,7 @@ app.post(
         (sum, item) => sum + item.price * item.quantity,
         0
       );
-      console.log(addressId);
+      console.log(cartItems);
       // 4️⃣ Insert order (reference the address_id)
       const orderResult = await db.query(
         `INSERT INTO orders (user_id, total, status, address,payment_method)
@@ -426,10 +430,16 @@ app.post('/cart', passport.authenticate('jwt', { session: false }), async (req, 
   }
 });
 app.get('/getCart', passport.authenticate('jwt', { session: false }), async (req, res) => {
-    const userId = req.user.user_id; 
-    const result = await db.query('SELECT name, image, user_id, price, quantity,  id AS product_id FROM cart WHERE user_id = $1', [userId]);
-    res.json(result.rows);
+  const userId = req.user.user_id; 
+  const result = await db.query(
+    `SELECT name, image, user_id, price, quantity, product_id AS id 
+     FROM cart 
+     WHERE user_id = $1`,
+    [userId]
+  );
+  res.json(result.rows);
 });
+
 
 app.post('/cart/delete', passport.authenticate('jwt', { session: false }), async (req, res) => {
   const { name } = req.body;
@@ -489,7 +499,7 @@ app.get('/categories', async (req, res) => {
 
 app.get(
   '/orders',
-  passport.authenticate('jwt', { session: false }),
+  
   async (req, res) => {
     try {
       // Fetch all orders for the logged-in user
@@ -498,7 +508,7 @@ app.get(
          FROM orders
          WHERE user_id = $1
          ORDER BY date_placed DESC`,
-        [req.user.user_id]
+        [6]
       );
 
       const orders = ordersResult.rows;
@@ -560,7 +570,7 @@ app.patch('/orders/:id/cancel',  passport.authenticate('jwt', { session: false }
 });
 app.get(
   "/orders/:id",
-  passport.authenticate("jwt", { session: false }),
+
   async (req, res) => {
     try {
       const { id,address_id } = req.params;
@@ -569,7 +579,7 @@ app.get(
       const orderRes = await db.query(
         `SELECT * FROM orders
          WHERE order_id = $1 AND user_id = $2`,
-        [id, req.user.user_id]
+        [id, 6]
       );
       const shipping_address = await db.query(
         `SELECT * FROM user_addresses
@@ -667,6 +677,93 @@ app.get('/highlights', async (req, res) => {
   } catch (error) {
     console.error('Error fetching highlights:', error);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+
+// Multer setup for image upload
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const dir = './uploads/';
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir);
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
+    // unique filename with timestamp + original extension
+    cb(null, Date.now() + path.extname(file.originalname));
+  },
+});
+
+const upload = multer({ storage });
+
+// Middleware to parse JSON (for other fields)
+app.use(express.json());
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+app.use('/images', express.static(path.join(__dirname, 'uploads')));
+
+// Route to create product with image upload
+app.post('/products', upload.single('image'), async (req, res) => {
+  try {
+    const {
+      title,
+      price,
+      description,
+      category,
+      rating_rate,
+      rating_count,
+      brand,
+      model,
+      color,
+      onsale,
+      discount,
+      stock,
+    } = req.body;
+
+    if (!title || !price) {
+      return res.status(400).json({ error: 'Title and price are required' });
+    }
+
+    // If image uploaded, generate URL (here simple path)
+    let imageUrl = null;
+    if (req.file) {
+      // Build full URL to the image
+      const protocol = req.protocol;           // 'http' or 'https'
+      const host = req.get('host');            // e.g. 'localhost:5000'
+      imageUrl = `${protocol}://${host}/images/${req.file.filename}`;
+    }
+    // Insert into DB
+    const query = `
+      INSERT INTO products (
+        title, price, description, category, image,
+        rating_rate, rating_count, brand, model, color,
+        onsale, discount, stock
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+      RETURNING *;
+    `;
+
+    const values = [
+      title,
+      price,
+      description || null,
+      category || null,
+      imageUrl,
+      rating_rate ? parseFloat(rating_rate) : null,
+      rating_count ? parseInt(rating_count) : null,
+      brand || null,
+      model || null,
+      color || null,
+      onsale ? (onsale === 'true' || onsale === true) : null,
+      discount ? parseInt(discount) : null,
+      stock ? parseInt(stock) : 0,
+    ];
+
+    const { rows } = await db.query(query, values);
+    res.status(201).json({ product: rows[0] });
+  } catch (err) {
+    console.error('Error creating product:', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
